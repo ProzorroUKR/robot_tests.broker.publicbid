@@ -1,646 +1,1145 @@
 *** Settings ***
-Library  Selenium2Screenshots
-Library  String
-Library  DateTime
-Library  publicbid_service.py
+
+Resource                                                        publicbid_common.robot
+Resource                                                        publicbid_plan.robot
+Resource                                                        publicbid_tender.robot
+Resource                                                        publicbid_qualification.robot
+Resource                                                        publicbid_contract.robot
+Resource                                                        publicbid_agreement.robot
 
 *** Variables ***
-${mail}          test_test@test.com
-${telephone}     +380630000000
-${bid_number}
 
 *** Keywords ***
-Підготувати дані для оголошення тендера
-  [Arguments]  @{ARGUMENTS}
-  Log Many  @{ARGUMENTS}
-  [return]  ${ARGUMENTS[1]}
-
 
 Підготувати клієнт для користувача
-  [Arguments]  @{ARGUMENTS}
-  [Documentation]  Відкрити браузер, створити об’єкт api wrapper, тощо
-  ...      ${ARGUMENTS[0]} ==  username
-  Open Browser   ${USERS.users['${ARGUMENTS[0]}'].homepage}   ${USERS.users['${ARGUMENTS[0]}'].browser}   alias=${ARGUMENTS[0]}
-  Set Window Size   @{USERS.users['${ARGUMENTS[0]}'].size}
-  Set Window Position   @{USERS.users['${ARGUMENTS[0]}'].position}
-  Run Keyword If   '${ARGUMENTS[0]}' != 'Publicbid_Viewer'   Вхід  ${ARGUMENTS[0]}
+    [Arguments]                                                 ${username}
+    [Documentation]                                             Відкриває переглядач на потрібній сторінці, готує api wrapper, тощо.
 
-Вхід
-  [Arguments]  ${username}
-  Run Keyword And Ignore Error   Wait Until Page Contains Element    xpath=//*[text()='Реєстрація/Вхід']   10
-  Click Element                      xpath=//*[text()='Реєстрація/Вхід']
-  Run Keyword And Ignore Error   Wait Until Page Contains Element   id=mForm:email   10
-  Input text   id=mForm:email      ${USERS.users['${username}'].login}
-  Sleep  2
-  Input text   id=mForm:pwd      ${USERS.users['${username}'].password}
-  Click Button   id=mForm:login
-  Sleep  3
+    init environment                                            ${username}
+    open browser                                                ${broker_baseurl}  ${broker_browser}  alias=${broker_username}
+    add cookie                                                  robottest  1  # for detecting from site side
+    set window size                                             @{browser_default_size}
+    set window position                                         @{browser_default_position}
+    set site language by code                                   ${broker_language_code}
+    login to site                                               ${USERS.users['${broker_username}']}
 
+Підготувати дані для оголошення тендера
+    [Arguments]                                                 ${username}  ${tender_data}  ${role_name}
+    [Documentation]                                             Адаптувати початкові дані для створення тендера. Наприклад, змінити дані про procuringEntity на дані
+    ...                                                         про користувача tender_owner на майданчику. Перевіряючи значення аргументу role_name, можна адаптувати
+    ...                                                         різні дані для різних ролей (наприклад, необхідно тільки для ролі tender_owner забрати з початкових
+    ...                                                         даних поле mode: test, а для інших ролей не потрібно робити нічого). Це ключове слово викликається в
+    ...                                                         циклі для кожної ролі, яка бере участь в поточному сценарії. З ключового слова потрібно повернути
+    ...                                                         адаптовані дані tender_data. Різниця між початковими даними і кінцевими буде виведена в консоль під
+    ...                                                         час запуску тесту.
+
+    ${tender_data_keys} =                                       get dictionary keys  ${tender_data['data']}
+    run keyword if                                              ${is_test_role_owner} and 'procuringEntity' in ${tender_data_keys}  prepare procuring entity data  ${tender_data['data']['procuringEntity']}
+    #run keyword if                                              ${is_test_role_owner} and 'buyers' in ${tender_data_keys}  prepare buyers data  ${tender_data['data']['buyers']}
+    [Return]                                                    ${tender_data}
+
+########################################################################################################################
+#################################################### PLAN KEYWORDS #####################################################
+########################################################################################################################
+
+Створити план
+    [Arguments]                                                 ${user}  ${plan_data}
+    [Documentation]                                             Створити план з початковими даними plan_data. Повернути uaid створеного плану.
+
+    # check buyers
+    ${plan_data} =                                              procuring_entity_name  ${plan_data}
+    log many  ${plan_data}
+    ${buyers_count} =                                           get length  ${plan_data['data']['buyers']}
+    run keyword if                                              ${buyers_count} != 1  fail  Buyer must be one
+    log many  ${plan_data['data']}
+
+    open new plan form
+    fill plan form                                              ${plan_data['data']}
+    save plan form and wait synchronization
+    ${plan_uaid} =                                              get text  ${plan_uaid_text_locator}
+    [Return]                                                    ${plan_uaid}
+
+Оновити сторінку з планом
+    [Arguments]                                                 ${username}  ${plan_uaid}
+    [Documentation]                                             Оновити сторінку з планом для отримання потенційно оновлених даних.
+
+    open plan page by uaid                                      ${plan_uaid}
+
+Пошук плану по ідентифікатору
+    [Arguments]                                                 ${username}  ${plan_uaid}
+    [Documentation]                                             Знайти план за зазначеним plan_uaid.
+
+    open plan search form
+    Execute Javascript  $('#plan-filter-form .dynamic-search-query input').click()
+    input to search form and wait results                       ${plan_search_form_query_input_locator}  ${plan_uaid}  ${plan_search_form_result_locator_tpl}
+
+Внести зміни в план
+    [Arguments]                                                 ${username}  ${plan_uaid}  ${fieldname}  ${fieldvalue}
+    [Documentation]                                             Змінити значення поля fieldname на fieldvalue для плана із зазначеним plan_uaid.
+
+    ${plan_data} =                                              generate dictionary from field path and value  ${fieldname}  ${fieldvalue}
+    open plan form by uaid                                      ${plan_uaid}
+    fill plan form                                              ${plan_data}
+    save plan form and wait synchronization
+
+Додати предмет закупівлі в план
+    [Arguments]                                                 ${username}  ${plan_uaid}  ${item_data}
+    [Documentation]                                             Додати дані про предмет item до плану plan_uaid.
+
+    open plan form by uaid                                      ${plan_uaid}
+    ${items} =                                                  create list  ${item_data}
+    fill plan form items                                        ${items}
+    save plan form and wait synchronization
+
+Видалити предмет закупівлі плану
+    [Arguments]                                                 ${username}  ${plan_uaid}  ${item_id}
+    [Documentation]                                             Видалити з плану plan_uaid предмет з item_id в описі.
+
+    open plan form by uaid                                      ${plan_uaid}
+    ${delete_item_btn_locator} =                                replace string  ${plan_form_remove_item_btn_locator_tpl}  %title%  ${item_id}
+    click removing form item and wait success result            ${delete_item_btn_locator}
+    save plan form and wait synchronization
+
+Отримати інформацію із плану
+    [Arguments]                                                 ${username}  ${plan_uaid}  ${field_name}
+    [Documentation]                                             Отримати інформацію із плану, користуючись ідентіфікатором плану та назвою поля ${field_name}.
+
+    open plan page by uaid                                      ${plan_uaid}  ${False}
+    ${field_name} =                                             set variable  plan.${field_name}.value
+    ${value} =                                                  get field_value by field_name on opened page  ${field_name}
+    [Return]                                                    ${value}
+
+Скасувати план
+    [Arguments]                                                 ${username}  ${plan_uaid}  ${data}
+    [Documentation]                                             Скасувати план plan_uaid.
+
+    open plan page by uaid                                      ${plan_uaid}
+    delete plan                                                 ${data}
+
+########################################################################################################################
+################################################### TENDER KEYWORDS ####################################################
+########################################################################################################################
+
+Створити тендер з критеріями
+    [Arguments]                                                 ${user}  ${tender_data}  ${tender_aid}  ${critery_data}
+    [Documentation]                                             Створити тендер з початковими даними tender_data. Повернути
+    ...                                                         uaid створеного тендера.
+
+    publicbid.Створити тендер                                  ${user}  ${tender_data}  ${tender_aid}
+    ${tender_uaid} =                                            get text  ${tender_uaid_text_locator}
+    [Return]                                                    ${tender_uaid}
 
 Створити тендер
-  [Arguments]  @{ARGUMENTS}
-  [Documentation]
-  ...      ${ARGUMENTS[0]} ==  username
-  ...      ${ARGUMENTS[1]} ==  tender_data
-  ${file_path}=        local_path_to_file   TestDocument.docx
-  ${prepared_tender_data}=  Get From Dictionary  ${ARGUMENTS[1]}  data
-  ${items}=         Get From Dictionary   ${prepared_tender_data}               items
-  ${title}=         Get From Dictionary   ${prepared_tender_data}               title
-  ${description}=   Get From Dictionary   ${prepared_tender_data}               description
-  ${budget}=        Get From Dictionary   ${prepared_tender_data.value}         amount
-  ${step_rate}=     Get From Dictionary   ${prepared_tender_data.minimalStep}   amount
-  ${enquiry_period}=  Get From Dictionary  ${prepared_tender_data}  enquiryPeriod
-  ${enquiry_period_end_date}=  publicbid_service.convert_date_to_string  ${enquiry_period.endDate}
-  ${tender_period}=  Get From Dictionary  ${prepared_tender_data}  tenderPeriod
-  ${tender_period_start_date}=  publicbid_service.convert_date_to_string  ${tender_period.startDate}
-  ${tender_period_end_date}=  publicbid_service.convert_date_to_string  ${tender_period.endDate}
-  ${countryName}=   Get From Dictionary   ${prepared_tender_data.procuringEntity.address}       countryName
-  ${item_description}=  Get From Dictionary  ${items[0]}  description
-  ${item_locality}=  Get From Dictionary  ${items[0].deliveryAddress}  locality
-  ${delivery_end_date}=      Get From Dictionary   ${items[0].deliveryDate}   endDate
-  ${delivery_end_date}=      publicbid_service.convert_item_date_to_string  ${delivery_end_date}
-  ${item_delivery_address_street_address}=  Get From Dictionary  ${items[0].deliveryAddress}  streetAddress
-  ${item_delivery_postal_code}=  Get From Dictionary  ${items[0].deliveryAddress}  postalCode
-  ${latitude}=  Get From Dictionary  ${items[0].deliveryLocation}  latitude
-  ${longtitude}=  Get From Dictionary  ${items[0].deliveryLocation}  longitude
-  ${cpv}=           Convert To String     "Картонки"
-  ${cpv_id}=           Get From Dictionary   ${items[0].classification}         id
-  ${cpv_id_1}=           Get Substring    ${cpv_id}   0   3
-  ${dkpp_desc}=     Get From Dictionary   ${items[0].additionalClassifications[0]}   description
-  ${dkpp_id}=       Get From Dictionary   ${items[0].additionalClassifications[0]}  id
-  ${code}=           Get From Dictionary   ${items[0].unit}          code
-  ${quantity}=      Get From Dictionary   ${items[0]}                        quantity
-  ${name}=      Get From Dictionary   ${prepared_tender_data.procuringEntity.contactPoint}       name
+    [Arguments]                                                 ${user}  ${tender_data}  ${tender_aid}
+    [Documentation]                                             Створити тендер з початковими даними tender_data. Повернути
+    ...                                                         uaid створеного тендера.
 
-  Selenium2Library.Switch Browser     ${ARGUMENTS[0]}
-  Wait Until Page Contains Element    xpath=//*[text()='Нова закупівля']   10
-  Click Element                       xpath=//*[text()='Нова закупівля']
-  Sleep  3
-  Click Element  xpath=//*[@id="mForm:chooseProcurementTypeBtn"]
-  Wait Until Page Contains Element    id=mForm:data:name  10
-  Input text                          id=mForm:data:name     ${title}
-  Input text                          id=mForm:data:desc     ${description}
-  Input text                          id=mForm:data:budget   ${budget}
-  Sleep  5
-  Input text                          id=mForm:data:step     ${step_rate}
-  Input text                          xpath=//*[@id="mForm:data:dEA_input"]  ${enquiry_period_end_date}
-  Input text                          xpath=//*[@id="mForm:data:dSPr_input"]  ${tender_period_start_date}
-  Input text                          xpath=//*[@id="mForm:data:dEPr_input"]  ${tender_period_end_date}
-  Click Element                       xpath=//*[@id='mForm:data:vat']/tbody/tr/td[1]//span
-  Click Element                       id=mForm:data:cKind_label
-  Click Element                       xpath=//div[@id='mForm:data:cKind_panel']//li[3]
-  Input text                          id=mForm:data:cCpvGr_input      ${cpv_id_1}
-  Wait Until Page Contains Element    xpath=.//*[@id='mForm:data:cCpvGr_panel']/table/tbody/tr/td[2]/span   10
-  Click Element                       xpath=.//*[@id='mForm:data:cCpvGr_panel']/table/tbody/tr/td[2]/span
-  Input text                          id=mForm:data:bidItem_0:subject    ${item_description}
-  Input text                          id=mForm:data:bidItem_0:cCpv_input   ${cpv_id}
-  Wait Until Page Contains Element    xpath=//div[@id='mForm:data:bidItem_0:cCpv_panel']//td[1]/span   10
-  Click Element                       xpath=//div[@id='mForm:data:bidItem_0:cCpv_panel']//td[1]/span
-  Input text                          id=mForm:data:bidItem_0:unit_input    ${code}
-  Wait Until Page Contains Element    xpath=//div[@id='mForm:data:bidItem_0:unit_panel']//tr/td[1]   10
-  Click Element                       xpath=//div[@id='mForm:data:bidItem_0:unit_panel']//tr/td[1]
-  Input text                          id=mForm:data:bidItem_0:amount   ${quantity}
-  Input text                          id=mForm:data:bidItem_0:cDkpp_input    ${dkpp_id}
-  Wait Until Page Contains Element    xpath=//div[@id='mForm:data:bidItem_0:cDkpp_panel']//tr[1]/td[2]/span   10
-  Click Element                       xpath=//div[@id='mForm:data:bidItem_0:cDkpp_panel']//tr[1]/td[2]/span
-  Input text                          xpath=//*[@id="mForm:data:bidItem_0:delDE_input"]  ${delivery_end_date}
-  Click Element                       xpath=//*[@id="mForm:data:bidItem_0:cReg"]/div[3]
-  Sleep  1
-  Click Element                       xpath=//*[@id="mForm:data:bidItem_0:cReg_items"]/li[26]
-  Sleep  1
-  Input Text                       xpath=//*[@id="mForm:data:bidItem_0:cTer_input"]  ${item_locality}
-  Sleep  2
-  Click Element                       xpath=//*[@id="mForm:data:bidItem_0:cTer_panel"]/table/tbody/tr[2]
-  Sleep  1
-  Input text                          id=mForm:data:bidItem_0:zc  ${item_delivery_postal_code}
-  Input text                          xpath=//*[@id="mForm:data:bidItem_0:delAdr"]  ${item_delivery_address_street_address}
-  Input text  id=mForm:data:bidItem_0:delLoc1  ${latitude}
-  Input text  id=mForm:data:bidItem_0:delLoc2  ${longtitude}
-  Input text                          id=mForm:data:rName    ${name}
-  Input text                          id=mForm:data:rPhone    ${telephone}
-  Input text                          id=mForm:data:rMail   ${mail}
-#  Input text                          id=mForm:data:stepPercent  1
-  Завантажити документ до тендеру  ${file_path}
-  Sleep  2
-  Run Keyword if   '${mode}' == 'multi'   Додати предмет   items
-  # Save
-  Click Element                       xpath=//*[@id="mForm:bSave"]
-  Sleep  10
-  Click Element                       xpath=//*[@id="mForm:infoBar"]/div[3]/button/span[2]
-  Sleep   5
-  # Announce
-  Click Element                       xpath=//span[text()="Оголосити"]
-  Sleep   2
-  # Confirm in message box
-  Click Element                       xpath=//div[contains(@class, "ui-confirm-dialog") and @aria-hidden="false"]//span[text()="Оголосити"]
-  Sleep   15
-  Click Element                       xpath=//span[contains(@class, "ui-button-text ui-c") and text()="Так"]
-  # More smart wait for id is needed there.
-  Sleep   2
+    ${tender_data} =                                            procuring_entity_name  ${tender_data}
+    log many  ${tender_data}
+    ${tender_prepared_data} =                                   prepare tender data  ${tender_data['data']}
+    log many  ${tender_prepared_data}
+    ##### BOF - TMP for negotiation milestone 1 lot#####
+    Set Global Variable    ${td_railway_crutch}  ${tender_data}
+    ##### EOF - TMP #####
 
-  ${bid_status}=  Get Text  xpath=//*[@id="mForm:data:status"]
-  :FOR    ${INDEX}    IN RANGE    1    25
-  \  Exit For Loop If  '${bid_status}' == 'Період уточнень'
-  \  Sleep  3
-  \  ${bid_status}=  Get Text  xpath=//*[@id="mForm:data:status"]
-  \  Run Keyword If  '${bid_status}' != 'Період уточнень'  Sleep  15
-  \  Run Keyword If  '${bid_status}' != 'Період уточнень'  Reload Page
+    ${tender_data_keys}=  Get Dictionary Keys  ${tender_data.data}
+    log many  ${SUITE_NAME}
+    ${procurementMethodType} =  Set Variable If  'procurementMethodType' in ${tender_data_keys}  ${tender_data.data.procurementMethodType}  belowThreshold
+    Run Keyword If  '${SUITE_NAME}' == 'Tests Files.Complaints' and '${procurementMethodType}' == 'aboveThresholdUA'  Go To  ${BROKERS['publicbid'].basepage}/utils/config?tacceleration=1000
+    Run Keyword If  '${SUITE_NAME}' == 'Tests Files.Complaints' and '${procurementMethodType}' == 'belowThreshold'  Go To  ${BROKERS['publicbid'].basepage}/utils/config?tacceleration=720
+    open new tender form
+    fill tender form                                            ${tender_prepared_data}
+    submit form and check result                                ${tender_form_submit_btn_locator}  ${tender_form_submit_success_msg}  ${tender_created_checker_element_locator}  ${true}
+    wait until page does not contain element with reloading     ${tender_sync_element_locator}
+    wait until page contains element with reloading             ${tender_uaid_text_locator}
+    ${tender_uaid} =                                            get text  ${tender_uaid_text_locator}
+    [Return]                                                    ${tender_uaid}
 
-  ${tender_UAid}=  Get Text           id=mForm:nBid
-  ${tender_UAid}=  Get Substring  ${tender_UAid}  19
-  ${Ids}       Convert To String  ${tender_UAid}
-  Run keyword if   '${mode}' == 'multi'   Set Multi Ids   ${tender_UAid}
-  [return]  ${Ids}
+Створити тендер другого етапу
+    [Arguments]                                                 ${user}  ${tender_data}
+    [Documentation]                                             Створити тендер другого етапу з початковими даними tender_data.
+    ...                                                         Повернути uaid створеного тендера.
 
-Завантажити документ до тендеру
-  [Arguments]   ${file}
-  Log  ${file}
-  Choose File       id=mForm:data:docFile_input     ${file}
-  Sleep  2
-  Selenium2Library.Capture Page Screenshot
-  Wait Until Page Contains Element    xpath=//*[text()='Картка документу']  10
-  Click Element  id=mForm:docCard:dcType_label
-  Wait Until Page Contains Element  id=mForm:docCard:dcType_panel  10
-  Click Element  xpath=//*[@id="mForm:docCard:dcType_panel"]/div/ul/li[2]
-  Click Element  xpath=//*[@id="mForm:docCard:docCard"]/table/tfoot/tr/td/button[1]
-  Sleep  2
-
-Завантажити документ
-  [Arguments]   ${username}  ${file}  ${tender_uaid}
-  Log  ${username}
-  Log  ${file}
-  Log  ${tender_uaid}
-  publicbid.Пошук тендера по ідентифікатору  ${username}  ${tender_uaid}
-  Завантажити документ до тендеру  ${file}
-  Input text  id=mForm:data:docAdjust     Test text
-  Click Element  xpath=//*[@id="mForm:bSave"]
-  Sleep  10
-  Click Element  xpath=//*[@id="primefacesmessagedlg"]/div/a
-
-
-Set Multi Ids
-  [Arguments]  @{ARGUMENTS}
-  [Documentation]
-  ...      ${ARGUMENTS[0]} ==  ${tender_UAid}
-  ${id}=           Get Text           id=mForm:nBid
-  ${Ids}   Create List    ${tender_UAid}   ${id}
-
-Додати предмет
-  [Arguments]  @{ARGUMENTS}
-  [Documentation]
-  ...      ${ARGUMENTS[0]} ==  items
-  ${dkpp_desc1}=     Get From Dictionary   ${items[1].additionalClassifications[0]}   description
-  ${dkpp_id11}=      Get From Dictionary   ${items[1].additionalClassifications[0]}  id
-  ${dkpp_desc2}=     Get From Dictionary   ${items[2].additionalClassifications[0]}   description
-  ${dkpp_id2}=       Get From Dictionary   ${items[2].additionalClassifications[0]}  id
-  ${dkpp_desc3}=     Get From Dictionary   ${items[3].additionalClassifications[0]}   description
-  ${dkpp_id3}=       Get From Dictionary   ${items[3].additionalClassifications[0]}  id
-
-  Wait Until Page Contains Element   xpath=//button[@class="ui-button ui-widget ui-state-default ui-corner-all ui-button-text-only"]   10
-  Wait Until Page Contains Element   xpath=//button[contains(@class, 'ui-button ui-widget ui-state-default ui-corner-all ui-button-text-only')]   10
-  Wait Until Page Contains Element   xpath=//span[text()="Додати предмет"]   10
-  Click Element                      xpath=//span[text()="Додати предмет"]
-  Wait Until Page Contains Element   id=mForm:data:subject1   10
-  Input text                         id=mForm:data:subject1    ${dkpp_desc1}
-  Input text                         id=mForm:data:cCpv1_input   ${cpv_id}
-  Wait Until Page Contains Element   xpath=//div[@id='mForm:data:cCpv1_panel']/table/tbody/tr/td[1]/span   10
-  Click Element                      xpath=//div[@id='mForm:data:cCpv1_panel']/table/tbody/tr/td[1]/span
-  Input text                         id=mForm:data:unit1_input    ${code}
-  Wait Until Page Contains Element   xpath=//div[@id='mForm:data:unit1_panel']/table/tbody/tr/td[1]   10
-  Click Element                      xpath=//div[@id='mForm:data:unit1_panel']/table/tbody/tr/td[1]
-  Input text                         id=mForm:data:amount1   ${quantity}
-  Input text                         id=mForm:data:cDkpp1_input    ${dkpp_id11}
-  Wait Until Page Contains Element   xpath=//div[@id='mForm:data:cDkpp1_panel']/table/tbody/tr/td[1]/span   10
-  Click Element                      xpath=//div[@id='mForm:data:cDkpp1_panel']/table/tbody/tr/td[1]/span
-  Click Element                      xpath=//span[text()="Додати предмет"]
-  Wait Until Page Contains Element   id=mForm:data:subject2   10
-  Input text                         id=mForm:data:subject2    ${dkpp_desc2}
-  Input text                         id=mForm:data:cCpv2_input   ${cpv_id}
-  Wait Until Page Contains Element   xpath=//div[@id='mForm:data:cCpv2_panel']/table/tbody/tr/td[1]/span   10
-  Click Element                      xpath=//div[@id='mForm:data:cCpv2_panel']/table/tbody/tr/td[1]/span
-  Input text                         id=mForm:data:unit2_input    ${code}
-  Wait Until Page Contains Element   xpath=//div[@id='mForm:data:unit2_panel']/table/tbody/tr/td[1]   10
-  Click Element                      xpath=//div[@id='mForm:data:unit2_panel']/table/tbody/tr/td[1]
-  Input text                         id=mForm:data:amount2   ${quantity}
-  Input text                         id=mForm:data:cDkpp2_input    ${dkpp_id2}
-  Wait Until Page Contains Element   xpath=//div[@id='mForm:data:cDkpp2_panel']/table/tbody/tr/td[1]/span   10
-  Click Element                      xpath=//div[@id='mForm:data:cDkpp2_panel']/table/tbody/tr/td[1]/span
-  Click Element                      xpath=//span[text()="Додати предмет"]
-  Wait Until Page Contains Element   id=mForm:data:subject3   10
-  Input text                         id=mForm:data:subject3    ${dkpp_desc3}
-  Input text                         id=mForm:data:cCpv3_input   ${cpv_id}
-  Wait Until Page Contains Element   xpath=//div[@id='mForm:data:cCpv3_panel']/table/tbody/tr/td[1]/span   10
-  Click Element                      xpath=//div[@id='mForm:data:cCpv3_panel']/table/tbody/tr/td[1]/span
-  Input text                         id=mForm:data:unit3_input    ${code}
-  Wait Until Page Contains Element   xpath=//div[@id='mForm:data:unit3_panel']/table/tbody/tr/td[1]   10
-  Click Element                      xpath=//div[@id='mForm:data:unit3_panel']/table/tbody/tr/td[1]
-  Input text                         id=mForm:data:amount3   ${quantity}
-  Input text                         id=mForm:data:cDkpp3_input    ${dkpp_id3}
-  Wait Until Page Contains Element   xpath=//div[@id='mForm:data:cDkpp3_panel']/table/tbody/tr/td[1]/span   10
-  Click Element                      xpath=//div[@id='mForm:data:cDkpp3_panel']/table/tbody/tr/td[1]/span
-
-Пошук тендера по ідентифікатору
-  [Arguments]  @{ARGUMENTS}
-  [Documentation]
-  ...      ${ARGUMENTS[0]} ==  username
-  ...      ${ARGUMENTS[1]} ==  tenderId
-  ...      ${ARGUMENTS[2]} ==  id
-  Switch browser   ${ARGUMENTS[0]}
-  ${current_location}=   Get Location
-  Wait Until Page Contains   Офіційний майданчик державних закупівель України   10
-  sleep  4
-  Click Element  xpath=//a[./text()="Закупівлі"]
-  sleep  15
-  Input Text   xpath=//*[@id="mForm:datalist:nBidClmn"]/div/input  ${ARGUMENTS[1]}
-  Press Key  xpath=//*[@id="mForm:datalist:nBidClmn"]/div/input  \\13
-  Sleep  10
-  :FOR    ${INDEX}    IN RANGE    1    30
-  \  ${find}=  Run Keyword And Return Status  Page Should Contain Element  xpath=//*[text()='${ARGUMENTS[1]}']
-  \  Exit For Loop If  '${find}' == 'True'
-  \  Sleep  10
-  \  Clear Element Text  xpath=//*[@id="mForm:datalist:nBidClmn"]/div/input
-  \  Input Text   xpath=//*[@id="mForm:datalist:nBidClmn"]/div/input  ${ARGUMENTS[1]}
-  \  Press Key  xpath=//*[@id="mForm:datalist:nBidClmn"]/div/input  \\13
-  \  Sleep  5
-  Click Element    xpath=//*[text()='${ARGUMENTS[1]}']
-  Wait Until Page Contains    ${ARGUMENTS[1]}   10
-  Sleep  10
-  Capture Page Screenshot
-
-Отримати інформацію із тендера
-  [Arguments]  @{ARGUMENTS}
-  [Documentation]
-  ...      ${ARGUMENTS[0]} ==  username
-  ...      ${ARGUMENTS[1]} ==  fieldname
-  Switch browser   ${ARGUMENTS[0]}
-  Run Keyword And Return  Отримати інформацію про ${ARGUMENTS[1]}
-
-Отримати інформацію про value.currency
-  ${return_value}=  Get Text  id=mForm:data:currency_label
-  ${return_value}=  Convert To String  UAH
-  [return]  ${return_value}
-
-Отримати інформацію про value.valueAddedTaxIncluded
-  ${return_value}=  Convert To Boolean  True
-  [return]  ${return_value}
-
-Отримати інформацію про title
-  ${return_value}=   Get Text  xpath=//*[@id="mForm:data:name"]
-  [return]  ${return_value}
-
-Отримати інформацію про description
-  ${return_value}=   Get Text  xpath=//*[@id="mForm:data:desc"]
-  [return]  ${return_value}
-
-Отримати інформацію про value.amount
-  ${return_value}=   Get Value  xpath=//*[@id="mForm:data:budget"]
-  Log  ${return_value}
-  ${return_value}=   Convert To Number   ${return_value}
-  [return]  ${return_value}
-
-Отримати інформацію про tenderID
-  ${return_value}=  Get Text           id=mForm:nBid
-  ${return_value}=  Get Substring  ${return_value}  19
-  ${return_value}=  Convert To String  ${return_value}
-  [return]  ${return_value}
-
-Отримати інформацію про procuringEntity.name
-  ${return_value}=  Get Text           xpath=//*[@id="mForm:data:orgName"]
-  [return]  ${return_value}
-
-Отримати інформацію про enquiryPeriod.startDate
-  ${return_value}=  Get Text           xpath=//*[@id="mForm:data:da"]
-  Fail  "Особливість реалізації, дата початку періоду уточнень = даті оголошення закупівлі"
-  [return]  ${return_value}
-
-Отримати інформацію про enquiryPeriod.endDate
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:dEA_input"]
-  ${return_value}=  publicbid_service.parse_date  ${return_value}
-  [return]  ${return_value}
-
-Отримати інформацію про tenderPeriod.startDate
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:dSPr_input"]
-  ${return_value}=  publicbid_service.parse_date  ${return_value}
-  [return]  ${return_value}
-
-Отримати інформацію про tenderPeriod.endDate
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:dEPr_input"]
-  ${return_value}=  publicbid_service.parse_date  ${return_value}
-  [return]  ${return_value}
-
-Отримати інформацію про minimalStep.amount
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:step"]
-  ${return_value}=  Convert To Number  ${return_value}
-  [return]  ${return_value}
-
-Внести зміни в тендер
-  [Arguments]  @{ARGUMENTS}
-  [Documentation]
-  ...      ${ARGUMENTS[0]} =  username
-  ...      ${ARGUMENTS[1]} =  ${TENDER_UAID}
-
-  Selenium2Library.Switch Browser    ${ARGUMENTS[0]}
-  publicbid.Пошук тендера по ідентифікатору   ${ARGUMENTS[0]}   ${ARGUMENTS[1]}
-  Wait Until Page Contains Element   xpath=//*[@id="mForm:data:status"]   10
-  ${tender_status}=  Get Text  xpath=//*[@id="mForm:data:status"]
-  ${new_description}=  Convert To String  Новое описания тендера
-  Run Keyword If  '${tender_status}' == 'Період уточнень'  Input text  xpath=//*[@id="mForm:data:desc"]  ${new_description}
-  Click Element              xpath=//*[@id="mForm:bSave"]
-  Sleep  10
-  Capture Page Screenshot
-
-Отримати інформацію про items[0].description
-  ${return_value}=  Get Text           xpath=//*[@id="mForm:data:bidItem_0:subject"]
-  [return]  ${return_value}
-
-Отримати інформацію про items[0].deliveryDate.endDate
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:bidItem_0:item0"]/tbody/tr[5]/td[4]/input
-  ${return_value}=  publicbid_service.parse_item_date  ${return_value}
-  [return]  ${return_value}
-
-Отримати інформацію про items[0].deliveryLocation.latitude
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:bidItem_0:delLoc1"]
-  Run Keyword And Return  Convert To Number  ${return_value}
-
-Отримати інформацію про items[0].deliveryLocation.longitude
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:bidItem_0:delLoc2"]
-  Run Keyword And Return  Convert To Number  ${return_value}
-
-Отримати інформацію про items[0].deliveryAddress.countryName
-  ${return_value}=  Get Text           xpath=//*[@id="mForm:data:bidItem_0:nState"]
-  ${return_value}=  capitalize_first_letter  ${return_value}
-  [return]  ${return_value}
-
-Отримати інформацію про items[0].deliveryAddress.postalCode
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:bidItem_0:zcText"]
-  [return]  ${return_value}
-
-Отримати інформацію про items[0].deliveryAddress.region
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:bidItem_0:cRegText"]
-  [return]  ${return_value}
-
-Отримати інформацію про items[0].deliveryAddress.locality
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:bidItem_0:cTerText"]
-  [return]  ${return_value}
-
-Отримати інформацію про items[0].deliveryAddress.streetAddress
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:bidItem_0:delAdr"]
-  [return]  ${return_value}
-
-Отримати інформацію про items[0].classification.scheme
-  ${return_value}=  Get Text           xpath=//*[@id="mForm:data:bidItem_0:item0"]/tbody/tr[3]/td/label
-  ${return_value}=  Get Substring  ${return_value}  36  39
-  ${return_value}=  Convert To String  ${return_value}
-  [return]  ${return_value}
-
-Отримати інформацію про items[0].classification.id
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:bidItem_0:cCpv_input"]
-  [return]  ${return_value}
-
-Отримати інформацію про items[0].classification.description
-  ${return_value}=  Get Text           xpath=//*[@id="mForm:data:bidItem_0:nCpv"]
-  [return]  ${return_value}
-
-Отримати інформацію про items[0].additionalClassifications[0].scheme
-  ${return_value}=  Get Text           xpath=//*[@id="mForm:data:bidItem_0:item0"]/tbody/tr[3]/td[3]/label
-  ${return_value}=  Get Substring  ${return_value}  36  40
-  ${return_value}=  Convert To String  ${return_value}
-  [return]  ${return_value}
-
-Отримати інформацію про items[0].additionalClassifications[0].id
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:bidItem_0:cDkpp_input"]
-  [return]  ${return_value}
-
-Отримати інформацію про items[0].additionalClassifications[0].description
-  ${return_value}=  Get Text           xpath=//*[@id="mForm:data:bidItem_0:nDkpp"]
-  ${return_value}=  Strip String  ${return_value}
-  [return]  ${return_value}
-
-Отримати інформацію про items[0].unit.name
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:bidItem_0:unit_input"]
-  ${return_value}=  Get Substring  ${return_value}  4
-  ${return_value}=  Convert To String  ${return_value}
-  [return]  ${return_value}
-
-Отримати інформацію про items[0].unit.code
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:bidItem_0:unit_input"]
-  ${return_value}=  Get Substring  ${return_value}  0  3
-  ${return_value}=  Convert To String  ${return_value}
-  [return]  ${return_value}
-
-Отримати інформацію про items[0].quantity
-  ${return_value}=  Get Value           xpath=//*[@id="mForm:data:bidItem_0:amount"]
-  ${return_value}=  Convert To Number  ${return_value}
-  [return]  ${return_value}
-
-
-Задати питання
-  [Arguments]  @{ARGUMENTS}
-  [Documentation]
-  ...      ${ARGUMENTS[0]} = username
-  ...      ${ARGUMENTS[1]} = ${TENDER_UAID}
-  ...      ${ARGUMENTS[2]} = question_data
-
-  ${title}=        Get From Dictionary  ${ARGUMENTS[2].data}  title
-  ${description}=  Get From Dictionary  ${ARGUMENTS[2].data}  description
-
-  Selenium2Library.Switch Browser    ${ARGUMENTS[0]}
-  Sleep  5
-  publicbid.Пошук тендера по ідентифікатору   ${ARGUMENTS[0]}   ${ARGUMENTS[1]}
-  Wait Until Page Contains Element   xpath=//*[@id="mForm:data:status"]   20
-  ${tender_status}=  Get Text  xpath=//*[@id="mForm:data:status"]
-  Run Keyword If  '${tender_status}' != 'Період уточнень'  Fail  "Період уточнень закінчився"
-  Click Element  xpath=//span[./text()='Обговорення']
-  Input Text  xpath=//*[@id="mForm:messT"]  ${title}
-  Input Text  xpath=//*[@id="mForm:messQ"]  ${description}
-#  Sleep  1200
-  Sleep  5
-#  Fail  "Проблемы со временем на сервере"
-  Click Element  xpath=//*[@id="mForm:btnQ"]
-  Sleep  30
+    ${tender_prepared_data} =                                   prepare tender data  ${tender_data['data']}
+    Set Global Variable    ${td_railway_crutch}  ${tender_data}
+    open new tender form
+    fill tender form 2 stage                                    ${tender_prepared_data}
+    submit form and check result                                ${tender_form_submit_btn_locator}  ${tender_form_submit_success_msg}  ${tender_created_checker_element_locator}
+    wait until page does not contain element with reloading     ${tender_sync_element_locator}
+    wait until page contains element with reloading             ${tender_uaid_text_locator}
+    ${tender_uaid} =                                            get text  ${tender_uaid_text_locator}
+    [Return]                                                    ${tender_uaid}
 
 Оновити сторінку з тендером
-  [Arguments]  @{ARGUMENTS}
-  [Documentation]
-  ...      ${ARGUMENTS[0]} =  username
-  ...      ${ARGUMENTS[1]} =  ${TENDER_UAID}
-  Selenium2Library.Switch Browser    ${ARGUMENTS[0]}
-  publicbid.Пошук тендера по ідентифікатору    ${ARGUMENTS[0]}   ${ARGUMENTS[1]}
-  Reload Page
+    [Arguments]                                                 ${username}  ${$tender_uaid}
+    [Documentation]                                             Оновити сторінку з тендером для отримання потенційно оновлених даних.
 
-Отримати інформацію про questions[0].title
-  Sleep  5
-  Click Element  xpath=//*[text()="Обговорення"]
-  Sleep  5
-  ${return_value}=  Get Text  xpath=//*[@id="mForm:data_data"]/tr[1]/td[1]/span[1]
-  [return]  ${return_value}
+    Selenium2Library.Switch Browser                             ${username}
+    open tender page by uaid                                    ${$tender_uaid}
 
-Отримати інформацію про questions[0].description
-  Sleep  5
-  Click Element  xpath=//*[text()="Обговорення"]
-  Sleep  5
-  ${return_value}=  Get Text  xpath=//*[@id="mForm:data_data"]/tr[1]/td[1]/span[2]
-  [return]  ${return_value}
+Пошук тендера по ідентифікатору
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${save_key}=${Empty}
+    [Documentation]                                             Знайти тендер з uaid рівним tender_uaid.
 
-Отримати інформацію про questions[0].date
-  Sleep  5
-  Click Element  xpath=//*[text()="Обговорення"]
-  Sleep  5
-  ${return_value}=  Get Text  xpath=//*[@id="mForm:data_data"]/tr/td[4]
-  [return]  ${return_value}
+    open tender search form
+    input to search form and wait results                       ${tender_search_form_query_input_locator}  ${tender_uaid}  ${tender_search_form_result_locator_tpl}
 
-Отримати інформацію про questions[0].answer
-  Sleep  5
-  Click Element  xpath=//*[text()="Обговорення"]
-  Sleep  5
-  ${return_value}=  Get Text  xpath=//*[@id="mForm:data_data"]/tr[2]/td[1]/span[2]
-  [return]  ${return_value}
+Отримати інформацію із тендера
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${field_name}
+    [Documentation]                                             Отримати значення поля field_name для тендера tender_uaid.
 
+    # fix for preventing error "Resolving variable '${award.value.amount}' failed: AttributeError: value" in next keywords for owner role
+##    run keyword if                                              ${is_test_role_owner} and '${field_name}' in 'awards[0].complaintPeriod.endDate awards[1].complaintPeriod.endDate awards[2].complaintPeriod.endDate awards[3].complaintPeriod.endDate'  fix awards data in global Users variable  ${username}
+
+    open tender page by uaid                                    ${tender_uaid}
+    Run Keyword And Return If                                   '${field_name}' == 'lots[0].minimalStep.currency'   Отримати інформацію із лоту minimalStep.currency  ${field_name}
+    Run Keyword And Return If                                   '${field_name}' == 'lots[0].minimalStep.valueAddedTaxIncluded'   Отримати інформацію із лоту minimalStep.valueAddedTaxIncluded  ${field_name}
+    Run Keyword And Return If                                   '${field_name}' == 'lots[0].value.valueAddedTaxIncluded'   Отримати інформацію із лоту value.valueAddedTaxIncluded  ${field_name}
+    Run Keyword And Return If                                   '${field_name}' == 'complaintPeriod.endDate'   Отримати інформацію із complaintPeriod.endDate
+    Run Keyword And Return If                                   '${field_name}' == 'items[0].deliveryLocation.latitude'   Fail   Поле не відображаем
+    run keyword if                                              '${field_name}' == 'status'  wait for tender status
+    run keyword if                                              '${field_name}' == 'agreements[0].status'  Wait Until Keyword Succeeds    1600 s    20 s    wait for agreements status active
+    run keyword if                                              '${field_name}' == 'qualificationPeriod.endDate'  Wait Until Keyword Succeeds    1600 s    20 s    Wait For QualificationsPeriodEnd
+    Run Keyword And Return If                                   '${field_name}' == 'contracts[0].status' or '${field_name}' == 'contracts[1].status'   Отримати інформацію із contracts[0].status
+    Run Keyword And Return If                                   '${field_name}' == 'qualificationPeriod.endDate' and '${mode}' in 'open_competitive_dialogue'   Отримати інформацію із qualificationPeriod.endDate
+    Run Keyword And Return If                                   '${field_name}' in 'awards[0].complaintPeriod.endDate awards[1].complaintPeriod.endDate awards[2].complaintPeriod.endDate awards[3].complaintPeriod.endDate'   Отримати інформацію із awards.complaintPeriod.endDate
+    Run Keyword And Return If                                   '${field_name}' in 'minimalStep.amount'   Отримати інформацію із minimalStep.amount
+    Run Keyword And Return If                                   '${field_name}' == 'awards[0].documents[0].title'   Отримати інформацію із awards[0].documents[0].title
+    ${field_name} =                                             set variable  tender.${field_name}.value
+    ${value} =                                                  get field_value by field_name on opened page  ${field_name}
+    [Return]                                                    ${value}
+
+Внести зміни в тендер
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${fieldname}  ${fieldvalue}
+    [Documentation]                                             Змінити значення поля fieldname на fieldvalue для плана із зазначеним plan_uaid.
+
+    ${tender_data} =                                            generate dictionary from field path and value  ${fieldname}  ${fieldvalue}
+#    Log Dictionary    ${USERS.users['${tender_owner}'].tender_data.data}
+    open tender form by uaid                                    ${tender_uaid}
+    fill tender form                                            ${tender_data}
+    capture page screenshot
+    save tender form and wait synchronization
+    capture page screenshot
+ #   Log Dictionary    ${USERS.users['${tender_owner}'].tender_data.data}
+
+Завантажити документ
+    [Arguments]                                                 ${username}  ${filepath}  ${tender_uaid}
+    [Documentation]                                             Завантажити документ, який знаходиться по шляху filepath,
+    ...                                                         до тендера tender_uaid.
+
+    open tender form by uaid                                    ${tender_uaid}
+    add document in tender                                      ${filepath}
+    save tender form and wait synchronization
+
+########################################################################################################################
+################################################### ITEM KEYWORDS ####################################################
+########################################################################################################################
+
+Додати предмет закупівлі
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${item_data}
+    [Documentation]                                             Додати дані про предмет item до тендера tender_uaid.
+
+    open tender form by uaid                                    ${tender_uaid}
+    ${items} =                                                  create list  ${item_data}
+    fill tender form items                                      ${items}
+    save tender form and wait synchronization
+
+Отримати інформацію із предмету
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${item_id}  ${field_name}
+    [Documentation]                                             Отримати значення поля field_name з предмету з item_id в описі для тендера tender_uaid.
+
+    open tender page by uaid                                    ${tender_uaid}
+    #перейти на соответствующий предмет в первом лоте, например, первый
+    run keyword and ignore error                                click visible element  ${tender_lot_1_tabs_item_btn_locator}
+    ${return_value} =                                           get value from item  ${item_id}  ${field_name}
+    [return]                                                    ${return_value}
+
+Видалити предмет закупівлі
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${item_id}  ${lot_id}=Empty
+    [Documentation]                                             Видалити з тендера tender_uaid предмет з item_id в описі
+    ...                                                         (предмет може бути прив'язаним до лоту з lot_id в описі,
+    ...                                                         якщо lot_id != Empty).
+
+    open tender form by uaid                                    ${tender_uaid}
+    wait until page does not contain element with reloading     ${tender_sync_element_locator}
+    ${tender_form_lots_remove_item_btn_locator} =               replace string  ${tender_form_lots_remove_item_btn_locator_tpl}  %item_id%  ${item_id}
+    click removing form item and wait success result            ${tender_form_lots_remove_item_btn_locator}
+
+    save tender form and wait synchronization
+
+
+########################################################################################################################
+################################################### END ITEM KEYWORDS #################################################
+########################################################################################################################
+
+########################################################################################################################
+################################################### LOT KEYWORDS ####################################################
+########################################################################################################################
+
+Створити лот
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${lot}
+    [Documentation]                                             Додати лот lot до тендера tender_uaid.
+
+Отримати інформацію із лоту
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${lot_id}  ${field_name}
+    [Documentation]                                             Отримати значення поля field_name з лоту з lot_id в описі для тендера tender_uaid.
+
+    open tender page by uaid                                    ${tender_uaid}
+    #перейти на соответствующий лот, например, первый
+    ${tender_lot_switch_tabs_lot_btn_locator} =                 replace string  ${tender_lot_switch_tabs_lot_btn_locator_tpl}  %lot_id%  ${lot_id}
+    click visible element                                       ${tender_lot_switch_tabs_lot_btn_locator}
+#    ${field_name} =                                             set variable  tender.lot.${field_name}.value
+    ${value} =                                                  get value from lot  ${lot_id}  ${field_name}
+#    ${value} =                                                  get field_value by field_name on opened page  ${field_name}
+    [Return]                                                    ${value}
+
+Завантажити документ в лот
+    [Arguments]                                                 ${username}  ${filepath}  ${tender_uaid}  ${lot_id}
+    [Documentation]                                             Завантажити документ, який знаходиться по шляху filepath,
+    ...                                                         до лоту з lot_id в описі для тендера tender_uaid.
+
+    open tender form by uaid                                    ${tender_uaid}
+    add document in lot                                         ${filepath}  ${lot_id}
+    save tender form and wait synchronization
+
+Змінити лот
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${lot_id}  ${fieldname}  ${fieldvalue}
+    [Documentation]                                             Змінити значення поля fieldname лоту з lot_id в описі
+    ...                                                         для тендера tender_uaid на fieldvalue.
+
+    ${tender_data} =                                            generate dictionary from field path and value  ${fieldname}  ${fieldvalue}
+    open tender form by uaid                                    ${tender_uaid}
+    #выбор нужного лота
+    click visible element                                       ${tender_form_lots_edit_lot1_btn_locator}
+    wait until popup is visible
+    fill lot form in opened popup                               ${tender_data}
+    submit current visible popup
+    save tender form and wait synchronization
+
+Додати предмет закупівлі в лот
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${lot_id}  ${item}
+    [Documentation]                                             Додати предмет item в лот з lot_id в описі для тендера tender_uaid.
+
+    open tender form by uaid                                    ${tender_uaid}
+    ${items} =                                                  create list  ${item}
+    fill tender form items                                      ${items}
+    save tender form and wait synchronization
+
+
+########################################################################################################################
+################################################### END LOT KEYWORDS #################################################
+########################################################################################################################
+########################################################################################################################
+################################################### FEATIRE KEYWORDS #############################################
+########################################################################################################################
+
+Додати неціновий показник на тендер
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${feature}
+    [Documentation]                                             Додати дані feature про неціновий показник до тендера tender_uaid.
+
+    open tender form by uaid                                    ${tender_uaid}
+    ${features} =                                               create list  ${feature}
+    fill tender form features                                   ${features}  ${tender_update_feature_tender_btn_locator}
+    #fill tender form features2                                  ${feature}  ${tender_update_feature_tender_btn_locator}
+    save tender form and wait synchronization
+
+Додати неціновий показник на предмет
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${feature}  ${item_id}
+    [Documentation]                                             Додати дані feature про неціновий показник до предмету з item_id в описі для тендера tender_uaid.
+
+    open tender form by uaid                                    ${tender_uaid}
+    ${features} =                                               create list  ${feature}
+    fill tender form features                                   ${features}  ${tender_form_item_add_feature_btn_locator}
+#    fill tender form features2                                  ${feature}  ${tender_form_item_add_feature_btn_locator}
+    save tender form and wait synchronization
+
+Додати неціновий показник на лот
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${feature}  ${lot_id}
+    [Documentation]                                             Додати дані feature про неціновий показник до лоту з lot_id в описі для тендера tender_uaid.
+
+    open tender form by uaid                                    ${tender_uaid}
+#    click visible element                                       ${tender_update_feature_lot_btn_locator}
+    ${features} =                                               create list  ${feature}
+    fill tender form features                                   ${features}  ${tender_update_feature_lot_btn_locator}
+#    fill tender form features2                                  ${feature}  ${tender_update_feature_lot_btn_locator}
+    save tender form and wait synchronization
+
+Отримати інформацію із нецінового показника
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${feature_id}  ${field_name}
+    [Documentation]                                             Отримати значення поля field_name з нецінового показника з feature_id в описі для тендера tender_uaid.
+
+    open tender page by uaid                                    ${tender_uaid}
+    wait until page does not contain element with reloading     ${tender_sync_element_locator}
+    ${return_value} =                                           get value from features  ${feature_id}  ${field_name}
+    [return]                                                    ${return_value}
+
+Видалити неціновий показник
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${feature_id}  ${obj_id}=Empty
+    [Documentation]                                             Видалити неціновий показник з feature_id в описі для тендера tender_uaid.
+
+    open tender form by uaid                                    ${tender_uaid}
+    Run Keyword If                                              '${TEST_NAME}' == 'Можливість видалити неціновий показник на предмет'    open popup by btn locator   ${tender_update_feature_item_btn_locator}
+    Run Keyword If                                              '${TEST_NAME}' == 'Можливість видалити неціновий показник на лот'    open popup by btn locator   ${tender_update_feature_lot_btn_locator}
+    Run Keyword If                                              '${TEST_NAME}' == 'Можливість видалити неціновий показник на тендер'    open popup by btn locator   ${tender_update_feature_tender_btn_locator}
+    ${delete_feature_btn_locator} =                             replace string  ${tender_feature_switch_dell_btn_locator_tpl}  %feature_id%  ${feature_id}
+    click removing form feature and wait success result         ${delete_feature_btn_locator}
+    save tender form and wait synchronization
+
+
+########################################################################################################################
+################################################### END FEATIRE KEYWORDS #############################################
+########################################################################################################################
+
+########################################################################################################################
+################################################### QUESTION KEYWORDS #############################################
+########################################################################################################################
+
+Відповісти на запитання
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${answer_data}  ${question_id}
+    [Documentation]                                             Дати відповідь answer_data на запитання з question_id
+    ...                                                         в описі для тендера tender_uaid.
+
+    open tender page by uaid                                    ${tender_uaid}
+    answer question                                             ${answer_data}  ${question_id}
+
+Задати запитання на предмет
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${item_id}  ${question}
+    [Documentation]                                             Створити запитання з даними question до предмету з item_id
+    ...                                                         в описі для тендера tender_uaid.
+
+    add question                                                ${username}  ${tender_uaid}  item  ${item_id}  ${question}
+
+Задати запитання на лот
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${lot_id}  ${question}
+    [Documentation]                                             Створити запитання з даними question до лоту з lot_id
+    ...                                                         в описі для тендера tender_uaid.
+
+    add question                                                ${username}  ${tender_uaid}  lot  ${lot_id}  ${question}
+
+Задати запитання на тендер
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${question}
+    [Documentation]                                             Створити запитання з даними question для тендера tender_uaid.
+
+    add question                                                ${username}  ${tender_uaid}  tender  null  ${question}
+
+Отримати інформацію із запитання
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${question_id}  ${field_name}
+    [Documentation]                                             Отримати значення поля field_name із запитання з question_id
+    ...                                                         в описі для тендера tender_uaid.
+
+    open tender page by uaid                                    ${tender_uaid}
+    ${value} =                                                  get question information  ${question_id}  ${field_name}
+    [Return]                                                    ${value}
+
+
+########################################################################################################################
+################################################### END QUESTION KEYWORDS #############################################
+########################################################################################################################
+
+########################################################################################################################
+################################################### CLAIM KEYWORDS #############################################
+########################################################################################################################
+Створити вимогу про виправлення умов закупівлі
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${claim}  ${doc_name}
+    [Documentation]                                             Створити запитання з даними question для тендера tender_uaid.
+
+    Run Keyword And Return                                      Створити вимогу  ${username}  ${tender_uaid}  tender  null  ${claim}  ${doc_name}
+
+Створити чернетку вимоги про виправлення умов закупівлі
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${claim}
+    [Documentation]                                             Створює вимогу claim про виправлення умов закупівлі
+    ...                                                         у статусі claim для тендера tender_uaid. Можна створити
+    ...                                                         вимогу як з документом, який знаходиться за шляхом document,
+    ...                                                         так і без нього.
+
+    Run Keyword And Return                                      Створити вимогу  ${username}  ${tender_uaid}  tender  null  ${claim}  null
+
+Створити вимогу про виправлення умов лоту
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${claim}  ${lot_id}  ${doc_name}
+    [Documentation]                                             Створює вимогу claim про виправлення умов лоту
+    ...                                                         у статусі draft для тендера tender_uaid.
+
+    Run Keyword And Return                                      Створити вимогу  ${username}  ${tender_uaid}  lot  ${lot_id}  ${claim}  ${doc_name}
+
+Створити чернетку вимоги про виправлення умов лоту
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${claim}  ${lot_id}
+    [Documentation]                                             Створює вимогу claim про виправлення умов закупівлі
+    ...                                                         у статусі draft для тендера tender_uaid.
+
+    Run Keyword And Return                                      Створити вимогу  ${username}  ${tender_uaid}  lot  ${lot_id}  ${claim}  null
+
+Створити вимогу про виправлення визначення переможця
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${claim}  ${proposal_id}  ${doc_name}
+    [Documentation]                                             Створює вимогу claim про виправлення визначення переможця
+    ...                                                         під номером award_index в статусі claim для тендера tender_uaid. Можна створити вимогу як з документом, який знаходиться за шляхом document, так і без нього.
+
+    Run Keyword And Return                                      Створити вимогу  ${username}  ${tender_uaid}  winner  ${proposal_id}  ${claim}  ${doc_name}
+
+Створити чернетку вимоги про виправлення визначення переможця
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${claim}  ${proposal_id}
+    [Documentation]                                             Створює вимогу claim про виправлення визначення переможця
+    ...                                                         під номером award_index в статусі draft для тендера tender_uaid.
+
+    Run Keyword And Return                                      Створити вимогу  ${username}  ${tender_uaid}  winner  ${proposal_id}  ${claim}  null
+
+Створити скаргу про виправлення визначення переможця
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${claim}  ${proposal_id}  ${doc_name}
+    [Documentation]                                             Створює скаргу claim про виправлення визначення переможця
+    ...                                                         під номером proposal_id в статусі claim для тендера tender_uaid.
+
+    Run Keyword And Return                                        Створити вимогу  ${username}  ${tender_uaid}  winner_complaint  ${proposal_id}  ${claim}  ${doc_name}
+
+
+Скасувати вимогу про виправлення умов закупівлі
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${complaintID}  ${cancellation_data}
+    [Documentation]                                             Перевести вимогу complaintID про виправлення умов закупівлі для
+    ...                                                         тендера tender_uaid у статус cancelled, використовуючи при цьому
+    ...                                                         дані cancellation_data.
+
+    Скасувати вимогу                                            ${username}  ${tender_uaid}  ${complaintID}  ${cancellation_data}  null
+
+Скасувати вимогу про виправлення умов лоту
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${complaintID}  ${cancellation_data}
+    [Documentation]                                             Перевести вимогу complaintID про виправлення умов лоту для тендера
+    ...                                                         tender_uaid у статус cancelled, використовуючи при цьому
+    ...                                                         дані cancellation_data.
+
+    Скасувати вимогу                                            ${username}  ${tender_uaid}  ${complaintID}  ${cancellation_data}  null
+
+Скасувати вимогу про виправлення визначення переможця
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${complaintID}  ${cancellation_data}  ${award_index}
+    [Documentation]                                             Перевести вимогу complaintID про виправлення визначення переможця
+    ...                                                         під номером award_index для тендера tender_uaid у статус cancelled, використовуючи
+    ...                                                         при цьому дані confirmation_data.
+
+    Скасувати вимогу                                            ${username}  ${tender_uaid}  ${complaintID}  ${cancellation_data}  ${award_index}
+
+Підтвердити вирішення вимоги про виправлення умов закупівлі
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${complaintID}  ${confirmation_data}
+    [Documentation]                                             Перевести вимогу complaintID про виправлення умов закупівлі для
+    ...                                                         тендера tender_uaid у статус resolved, використовуючи при цьому дані
+    ...                                                         confirmation_data.
+
+    Підтвердити вирішення вимоги                                ${username}  ${tender_uaid}  tender  null  ${complaintID}  ${confirmation_data}  null
+
+Підтвердити вирішення вимоги про виправлення умов лоту
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${complaintID}  ${confirmation_data}
+    [Documentation]                                             Перевести вимогу complaintID про виправлення умов лоту для тендера
+    ...                                                         tender_uaid у статус resolved, використовуючи при цьому дані confirmation_data.
+
+    Підтвердити вирішення вимоги                                ${username}  ${tender_uaid}  lot  null  ${complaintID}  ${confirmation_data}  null
+
+Підтвердити вирішення вимоги про виправлення визначення переможця
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${complaintID}  ${confirmation_data}  ${award_index}
+    [Documentation]                                             Перевести вимогу complaintID про виправлення визначення переможця
+    ...                                                         під номером award_index для тендера tender_uaid у статус resolved, використовуючи
+    ...                                                         при цьому дані confirmation_data.
+
+    Підтвердити вирішення вимоги                                ${username}  ${tender_uaid}  award  null  ${complaintID}  ${confirmation_data}  ${award_index}
+
+Перетворити вимогу про виправлення умов закупівлі в скаргу
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${complaintID}  ${escalating_data}
+    [Documentation]                                             Перевести вимогу complaintID про виправлення умов закупівлі для
+    ...                                                         тендера tender_uaid у статус pending, використовуючи при цьому дані
+    ...                                                         escalating_data.
+
+    Підтвердити вирішення вимоги                                ${username}  ${tender_uaid}  tender  null  ${complaintID}  ${escalating_data}  null
+
+Перетворити вимогу про виправлення умов лоту в скаргу
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${complaintID}  ${escalating_data}
+    [Documentation]                                             Перевести вимогу complaintID про виправлення умов лоту для тендера
+    ...                                                         tender_uaid у статус pending, використовуючи при цьому дані escalating_data.
+
+    Підтвердити вирішення вимоги                                ${username}  ${tender_uaid}  lot  null  ${complaintID}  ${escalating_data}  null
+
+Перетворити вимогу про виправлення визначення переможця в скаргу
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${complaintID}  ${escalating_data}  ${award_index}
+    [Documentation]                                             Перевести вимогу complaintID про виправлення визначення переможця
+    ...                                                         під номером award_index для тендера tender_uaid у статус pending, використовуючи при
+    ...                                                         цьому дані escalating_data.
+
+    Підтвердити вирішення вимоги                                ${username}  ${tender_uaid}  award  null  ${complaintID}  ${escalating_data}  ${award_index}
+
+Отримати інформацію із скарги
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${complaintID}  ${field_name}  ${object_index}=${None}  ${object}=${None}
+    [Documentation]                                             Отримати значення поля field_name скарги/вимоги complaintID про
+    ...                                                         виправлення умов закупівлі/лоту для тендера tender_uaid (скарги/вимоги про
+    ...                                                         виправлення визначення переможця під номером award_index, якщо award_index != None).
+
+    ${value} =                                                  get claim information  ${tender_uaid}  ${complaintID}  ${field_name}  ${award_index}=${None}
+    [Return]                                                    ${value}
+
+Отримати інформацію із документа до скарги
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${complaintID}  ${doc_id}  ${field_name}
+    [Documentation]                                             Отримати значення поля field_name з документу doc_id до скарги/вимоги
+    ...                                                         complaintID для тендера tender_uaid.
+
+    open tender page by uaid                                    ${tender_uaid}
+    ${return_value} =                                           Run Keyword If  'title' == '${field_name}'   Отримати інформацію із документа скарги title  ${complaintID}  ${doc_id}
+    [return]                                                    ${return_value}
+
+Отримати документ до скарги
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${complaintID}  ${doc_id}
+    [Documentation]                                             Завантажити файл doc_id до скарги complaintID для тендера tender_uaid
+    ...                                                         в директорію ${OUTPUT_DIR} для перевірки вмісту цього файлу.
+
+    open tender page by uaid                                    ${tender_uaid}
+    ${return_value} =                                           get document complaint  ${complaintID}  ${doc_id}
+    [return]                                                    ${return_value}
+
+Відповісти на вимогу про виправлення умов закупівлі
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${complaintID}  ${answer_data}
+    [Documentation]                                             Відповісти на вимогу complaintID про виправлення умов закупівлі для
+    ...                                                         тендера tender_uaid, використовуючи при цьому дані answer_data.
+
+    Відповісти на вимогу                                        ${username}  ${tender_uaid}  ${complaintID}  ${answer_data}  null
+
+Відповісти на вимогу про виправлення умов лоту
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${complaintID}  ${answer_data}
+    [Documentation]                                             Відповісти на вимогу complaintID про виправлення умов лоту для тендера
+    ...                                                         tender_uaid, використовуючи при цьому дані answer_data.
+
+    Відповісти на вимогу                                        ${username}  ${tender_uaid}  ${complaintID}  ${answer_data}  null
+
+Відповісти на вимогу про виправлення визначення переможця
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${complaintID}  ${answer_data}  ${award_index}
+    [Documentation]                                             Відповісти на вимогу complaintID про виправлення визначення переможця
+    ...                                                         під номером award_index для тендера tender_uaid, використовуючи при цьому дані answer_data.
+
+    Відповісти на вимогу                                        ${username}  ${tender_uaid}  ${complaintID}  ${answer_data}  ${award_index}
+
+Створити чернетку скарги про виправлення умов закупівлі
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${claim}
+    [Documentation]                                             Створює скаргу claim про виправлення умов закупівлі
+    ...                                                         у статусі claim для тендера tender_uaid. Можна створити
+    ...                                                         вимогу як з документом, який знаходиться за шляхом document,
+    ...                                                         так і без нього.
+
+    Run Keyword And Return                                      Створити вимогу  ${username}  ${tender_uaid}  tender  null  ${claim}  null
+
+
+########################################################################################################################
+################################################### END CLAIM KEYWORDS #############################################
+########################################################################################################################
+
+########################################################################################################################
+################################################### BID KEYWORDS #############################################
+########################################################################################################################
 Подати цінову пропозицію
-  [Arguments]  @{ARGUMENTS}
-  [Documentation]
-  ...      ${ARGUMENTS[0]} ==  username
-  ...      ${ARGUMENTS[1]} ==  ${TENDER_UAID}
-  ...      ${ARGUMENTS[2]} ==  ${test_bid_data}
-  Sleep  120
-  ${amount}=        Get From Dictionary   ${ARGUMENTS[2].data.value}         amount
-  publicbid.Пошук тендера по ідентифікатору   ${ARGUMENTS[0]}   ${ARGUMENTS[1]}
-  ${tender_status}=  Get Text  xpath=//*[@id="mForm:data:status"]
-  Run Keyword If  '${tender_status}' == 'Період уточнень'  Fail  "Неможливо подати цінову пропозицію в період уточнень"
-  Click Element  xpath=//*[text()='Зареєструвати пропозицію']
-  Sleep  2
-  Input Text  xpath=//*[@id="mForm:data:amount"]  ${amount}
-  Input Text  xpath=//*[@id="mForm:data:rName"]  Тестовий закупівельник
-  Input Text  xpath=//*[@id="mForm:data:rPhone"]  ${telephone}
-  Input Text  xpath=//*[@id="mForm:data:rMail"]  ${mail}
-  Click Element  xpath=//*[text()='Зберегти']
-  Sleep  3
-  Click Element  xpath=//*[@id="mForm:infoBar"]/div[3]/button/span[2]
-  Sleep  1
-  Click Element  xpath=//*[text()='Зареєструвати пропозицію']
-  Sleep  5
-  ${status}=  Run Keyword And Return Status  Page Should Contain Element  xpath=//*[@id="mForm:opt1"]
-  Run Keyword If  '${status}' == 'True'  Click Element  xpath=//*[@id="mForm:opt1"]/div[2]/span
-  Run Keyword If  '${status}' == 'True'  Click Element  xpath=//*[text()='Подати пропозицію']
-  Sleep  5
-  ${bid_number}=  Get Text  xpath=//*[@id="mForm:data"]/div[1]/table/tbody/tr[1]/td[2]
-  Selenium2Library.Capture Page Screenshot
-  Sleep  60
-  [return]  ${bid_number}
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${bid}  ${lots_ids}=${None}  ${features_ids}=${None}
+    [Documentation]                                             Подати цінову пропозицію bid для тендера tender_uaid
+    ...                                                         на лоти lots_ids (якщо lots_ids != None) з неціновими
+    ...                                                         показниками features_ids (якщо features_ids != None).
 
-Скасувати цінову пропозицію
-  [Arguments]  @{ARGUMENTS}
-  [Documentation]
-  ...      ${ARGUMENTS[0]} ==  username
-  ...      ${ARGUMENTS[1]} ==  ${TENDER_UAID}
-  ...      ${ARGUMENTS[2]} ==  bid_number
-  Log Many  @{ARGUMENTS}
-  Пошук цінової пропозиції  ${ARGUMENTS[0]}  ${ARGUMENTS[2]}
-  Selenium2Library.Capture Page Screenshot
-  Click Element  xpath=//*[@id="mForm:proposalCancelBtn"]
-  Selenium2Library.Capture Page Screenshot
-  Click Element  xpath=//*[@id="mForm:proposalCancelBtnYes"]
-  Sleep  5
-
-
-Пошук цінової пропозиції
-  [Arguments]  @{ARGUMENTS}
-  [Documentation]
-  ...      ${ARGUMENTS[0]} ==  username
-  ...      ${ARGUMENTS[1]} ==  bid_number
-  Log Many  @{ARGUMENTS}
-  Switch browser   ${ARGUMENTS[0]}
-  Click Element  xpath=//*[text()='Мій кабінет']
-  Sleep  5
-  Selenium2Library.Capture Page Screenshot
-  Click Element  xpath=//*[text()='Мої пропозиції']
-  Sleep  5
-  Selenium2Library.Capture Page Screenshot
-  Click Element  xpath=//*[@id="mForm:propsRee_data"]/tr[1]/td[1]/div
-  Sleep  5
-  Click Element  xpath=//*[@id="mForm:propsRee:0:browseProposalDetailBtn"]
-  Sleep  10
-
-
-Відповісти на питання
-  [Arguments]  @{ARGUMENTS}
-  [Documentation]
-  ...      ${ARGUMENTS[0]} = username
-  ...      ${ARGUMENTS[1]} = ${TENDER_UAID}
-  ...      ${ARGUMENTS[2]} = 0
-  ...      ${ARGUMENTS[3]} = answer_data
-
-  ${answer}=     Get From Dictionary  ${ARGUMENTS[3].data}  answer
-
-  Selenium2Library.Switch Browser    ${ARGUMENTS[0]}
-  Sleep  5
-  publicbid.Пошук тендера по ідентифікатору   ${ARGUMENTS[0]}   ${ARGUMENTS[1]}
-  Wait Until Page Contains Element   xpath=//*[@id="mForm:data:status"]   10
-  ${tender_status}=  Get Text  xpath=//*[@id="mForm:data:status"]
-  Run Keyword If  '${tender_status}' != 'Період уточнень'  Fail  "Період уточнень закінчився"
-  Click Element                      xpath=//span[./text()='Обговорення']
-  Sleep  3
-  Click Element                      xpath=//*[@id="mForm:data_data"]/tr[1]/td[5]/button
-  Input Text  xpath=//*[@id="mForm:messT"]  "Test answer"
-  Input Text  xpath=//*[@id="mForm:messQ"]  ${answer}
-  Click Element                      xpath=//*[@id="mForm:btnR"]
-  Sleep  4
-
-Отримати посилання на аукціон для глядача
-  [Arguments]  ${username}  ${tender_uaid}
-  [Documentation]
-  ...   ${username} === username
-  ...   ${tender_uaid} == tender_uaid
-  Sleep  130
-  Selenium2Library.Switch Browser    ${username}
-  publicbid.Пошук тендера по ідентифікатору  ${username}  ${tender_uaid}
-  Page Should Contain Element  xpath=//*[text()='Перегляд аукціону']
-  Sleep  3
-  ${url}=  Get Element Attribute  mForm:data:auctionLink@href
-  [return]  ${url}
-
-Отримати посилання на аукціон для учасника
-  [Arguments]  ${username}  ${tender_uaid}
-  [Documentation]
-  ...   ${username} === username
-  ...   ${tender_uaid} == tender_uaid
-  Sleep  130
-  Selenium2Library.Switch Browser    ${username}
-  publicbid.Пошук тендера по ідентифікатору  ${username}  ${tender_uaid}
-  Wait Until Page Contains Element    xpath=//*[text()='Перегляд аукціону']   60
-  Page Should Contain Element  xpath=//*[text()='Перегляд аукціону']
-  Sleep  3
-  ${url}=  Get Element Attribute  mForm:data:auctionLink@href
-  Log  ${url}
-  [return]  ${url}
+    open tender page by uaid                                    ${tender_uaid}
+    fill bid form                                               ${tender_uaid}  ${bid}  ${lots_ids}  ${features_ids}
+    submit form and check result                                ${bid_form_submit_btn_locator}  ${bid_form_submit_success_msg}  ${tender_created_checker_element_locator}  ${true}
+    wait until page does not contain element with reloading     ${tender_sync_element_locator}
 
 Змінити цінову пропозицію
-  [Arguments]  @{ARGUMENTS}
-  Log Many  @{ARGUMENTS}
-  Пошук цінової пропозиції  ${ARGUMENTS[0]}  ${ARGUMENTS[1]}
-  Input Text  xpath=//*[@id="mForm:data:amount"]  ${ARGUMENTS[3]}
-  Click Element  xpath=//*[text()='Зберегти']
-  Sleep  15
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${fieldname}  ${fieldvalue}
+    [Documentation]                                             Змінити поле fieldname на fieldvalue цінової пропозиції користувача
+    ...                                                         username для тендера tender_uaid.
+
+    open tender page by uaid                                    ${tender_uaid}
+    fill bid form edit                                          ${fieldname}  ${fieldvalue}
+    capture page screenshot
+    submit form and check result                                ${bid_form_submit_btn_locator}  ${bid_form_submit_edit_success_msg}  ${tender_created_checker_element_locator}  ${true}
+    wait until page does not contain element with reloading     ${tender_sync_element_locator}
+
+Скасувати цінову пропозицію
+    [Arguments]                                                 ${username}  ${tender_uaid}
+    [Documentation]                                             Змінити статус цінової пропозиції для тендера tender_uaid
+    ...                                                         користувача username на cancelled.
+
+    open tender page by uaid                                    ${tender_uaid}
+    fill bid form remove
+    submit form and check result                                ${bid_form_submit_btn_locator}  ${bid_form_submit_edit_success_msg}  ${tender_created_checker_element_locator}  ${true}
+    wait until page does not contain element with reloading     ${tender_sync_element_locator}
 
 Завантажити документ в ставку
-  [Arguments]  @{ARGUMENTS}
-  Log Many  @{ARGUMENTS}
-  Choose File       id=mForm:data:tFile_input    ${ARGUMENTS[1]}
-  Sleep  3
-  Selenium2Library.Capture Page Screenshot
-  Wait Until Page Contains Element    xpath=//*[text()='Картка документу']  10
-  Click Element  id=mForm:docCard:dcType_label
-  Wait Until Page Contains Element  id=mForm:docCard:dcType_panel  10
-  Click Element  xpath=//*[@id="mForm:docCard:dcType_panel"]/div/ul/li[2]
-  Click Element  xpath=//*[@id="mForm:docCard:docCard"]/table/tfoot/tr/td/button[1]
-  Sleep  4
-  Click Element  xpath=//*[text()='Зберегти']
-  ${return_value}=  Get Text  xpath=//*[@id="mForm:data:pnlFilesT"]/div/div/div/table/tbody/tr[1]/td[1]/span
-  [return]  ${return_value}
+    [Arguments]                                                 ${username}  ${path}  ${tender_uaid}  ${doc_type}=documents  ${doc_name}=${None}
+    [Documentation]                                             Завантажити документ типу doc_type, який знаходиться за шляхом path,
+    ...                                                         до цінової пропозиції користувача username для тендера tender_uaid.
+
+    open tender page by uaid                                    ${tender_uaid}
+    add document to bid                                         ${path}  ${doc_type}  ${doc_name}
+    capture page screenshot
+    submit form and check result                                ${bid_form_submit_btn_locator}  ${bid_form_submit_edit_success_msg}  ${tender_created_checker_element_locator}  ${true}
+    wait until page does not contain element with reloading     ${tender_sync_element_locator}
 
 Змінити документ в ставці
-  [Arguments]  @{ARGUMENTS}
-  Log Many  @{ARGUMENTS}
-  ${status}=  Run Keyword And Return Status  Page Should Contain Element  xpath=//*[@id="mForm:data:pnlFilesT"]/div/div/div/table/tbody/tr[1]/td[5]/button[1]
-  Run Keyword if   '${status}' == 'False'   Fail  "Закінчився період подачі пропозицій"
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${path}  ${doc_id}
+    [Documentation]                                             Змінити документ з doc_id в описі в пропозиції користувача username для
+    ...                                                         тендера tender_uaid на документ, який знаходиться по шляху path.
 
+    open tender page by uaid                                    ${tender_uaid}
+    document to bid edit                                        ${path}  ${doc_id}
+    capture page screenshot
+    submit form and check result                                ${bid_form_submit_btn_locator}  ${bid_form_submit_edit_success_msg}  ${tender_created_checker_element_locator}  ${true}
+    wait until page does not contain element with reloading     ${tender_sync_element_locator}
+
+Змінити документацію в ставці
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${doc_data}  ${doc_id}
+    [Documentation]                                             Змінити тип документа з doc_id в заголовку в пропозиції користувача
+    ...                                                         username для тендера tender_uaid. Дані про новий тип документа знаходяться в doc_data.
+
+    open tender page by uaid                                    ${tender_uaid}
+    fill bid form edit document                                 ${doc_data}  ${doc_id}
+    capture page screenshot
+    submit form and check result                                ${bid_form_submit_btn_locator}  ${bid_form_submit_edit_success_msg}  ${tender_created_checker_element_locator}  ${true}
+    wait until page does not contain element with reloading     ${tender_sync_element_locator}
+
+Отримати інформацію із пропозиції
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${field}
+    [Documentation]                                             Отримати значення поля field пропозиції користувача
+    ...                                                         username для тендера tender_uaid.
+
+    open tender page by uaid                                    ${tender_uaid}
+    ${value} =                                                  get bid information  ${field}
+    [Return]                                                    ${value}
+
+
+########################################################################################################################
+################################################### END BID KEYWORDS #############################################
+########################################################################################################################
+################################################### QUALIFICATION KEYWORDS #############################################
+########################################################################################################################
+Завантажити документ рішення кваліфікаційної комісії
+    [Arguments]                                                 ${username}  ${document}  ${tender_uaid}  ${award_num}
+    [Documentation]                                             Завантажити документ, який знаходиться по шляху document до
+    ...                                                         постачальника під номером award_num для тендера tender_uaid.
+
+    open tender page by uaid                                    ${tender_uaid}
+#    open tender form qualification                              ${award_num}
+#    wait until popup is visible
+    copy file qualification                                     ${username}  ${document}  ${award_num}
+
+Підтвердити постачальника
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${award_num}
+    [Documentation]                                             Перевести постачальника під номером award_num для тендера tender_uaid
+    ...                                                         в статус active.
+
+    open tender page by uaid                                    ${tender_uaid}
+    open tender form qualification                              ${award_num}
+    confirm award qualification                                 ${username}  ${award_num}
+
+Дискваліфікувати постачальника
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${award_num}
+    [Documentation]                                             Перевести постачальника під номером award_num для тендера tender_uaid
+    ...                                                         в статус unsuccessful.
+
+    open tender page by uaid                                    ${tender_uaid}
+    open tender form qualification                              ${award_num}
+    reject award qualification                                  ${username}  ${award_num}
+
+Скасування рішення кваліфікаційної комісії
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${award_num}
+    [Documentation]                                             Перевести постачальника під номером award_num для тендера tender_uaid
+    ...                                                         в статус cancelled.
+
+    open tender page by uaid                                    ${tender_uaid}
+    open tender form qualification                              ${award_num}
+    cancel award qualification
+
+Затвердити постачальників
+    [Arguments]                                                 ${username}  ${tender_uaid}
+    [Documentation]                                             Перевести постачальників для тендера tender_uaid
+    ...                                                         в статус active.
+
+    open tender page by uaid                                    ${tender_uaid}
+    confirm awards
+
+########################################################################################################################
+################################################### END QUALIFICATION KEYWORDS ########################################
+########################################################################################################################
+
+########################################################################################################################
+################################################### LIMITED PROCUREMENT KEYWORDS ######################################
+########################################################################################################################
+Створити постачальника, додати документацію і підтвердити його
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${supplier_data}  ${document}
+    [Documentation]                                             Додати постачальника supplier_data для тендера tender_uaid, додати до
+    ...                                                         нього документ, який знаходиться по шляху document та перевести в статус active.
+
+    open tender form by uaid                                    ${tender_uaid}
+#    fill tender from award reporting                            ${supplier_data.data.value.amount}  ${supplier_data.data.suppliers[0]}
+    fill tender from award reporting                            ${rep_val}  ${supplier_data.data.suppliers[0]}
+    run keyword and ignore error                                save tender form and wait synchronization
+    confirm award                                               ${document}
+########################################################################################################################
+################################################### END LIMITED PROCUREMENT KEYWORDS ##################################
+########################################################################################################################
+
+########################################################################################################################
+################################################### OPEN PROCUREMENT KEYWORDS ####################################
+########################################################################################################################
+Підтвердити кваліфікацію
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${qualification_num}
+    [Documentation]                                             Перевести кваліфікацію під номером qualification_num до тендера
+    ...                                                         tender_uaid в статус active.
+
+    open tender page by uaid                                    ${tender_uaid}
+    open tender form prequalification                           ${qualification_num}
+#    wait until popup is visible
+    confirm qualifications
+#    submit current visible popup
+
+Відхилити кваліфікацію
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${qualification_num}
+    [Documentation]                                             Перевести кваліфікацію під номером qualification_num до тендера
+    ...                                                         tender_uaid в статус unsuccessful.
+
+    open tender page by uaid                                    ${tender_uaid}
+    open tender form prequalification                           ${qualification_num}
+#    wait until popup is visible
+    reject qualifications
+#    submit current visible popup
+
+
+Завантажити документ у кваліфікацію
+    [Arguments]                                                 ${username}  ${document}  ${tender_uaid}  ${qualification_num}
+    [Documentation]                                             Завантажити документ, який знаходиться по шляху document, до
+    ...                                                         кваліфікації під номером qualification_num до тендера tender_uaid.
+
+    open tender page by uaid                                    ${tender_uaid}
+
+Скасувати кваліфікацію
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${qualification_num}
+    [Documentation]                                             Перевести кваліфікацію під номером qualification_num до тендера
+    ...                                                         tender_uaid в статус cancelled.
+
+    open tender page by uaid                                    ${tender_uaid}
+    open tender form prequalification                           ${qualification_num}
+    cancel qualifications
+
+Затвердити остаточне рішення кваліфікації
+    [Arguments]                                                 ${username}  ${tender_uaid}
+    [Documentation]                                             Перевести тендер tender_uaid в статус active.pre-qualification.stand-still.
+
+    open tender page by uaid                                    ${tender_uaid}
+    wait until page contains element with reloading             ${prequalification_form_approve_open_btn_locator}
+    click visible element                                       ${prequalification_form_approve_open_btn_locator}
+    approve the final qualification decision
+
+Перевести тендер на статус очікування обробки мостом
+    [Arguments]                                                 ${username}  ${tender_uaid}
+    [Documentation]                                             Перевести тендер tender_uaid в статус active.stage2.waiting.
+
+    open tender page by uaid                                    ${tender_uaid}
+    confirm-stage2
+
+Отримати доступ до тендера другого етапу
+    [Arguments]                                                 ${username}  ${tender_uaid}
+    [Documentation]                                             Отримати тендер другого етапу по tender id, зберегти його.
+
+    open tender page by uaid                                    ${tender_uaid}
+    Log to Console  ${tender_uaid}
+
+Активувати другий етап
+    [Arguments]                                                 ${username}  ${tender_uaid}
+    [Documentation]                                             Перевести тендер tender_uaid в статус active.tendering.
+
+    open tender form by uaid                                    ${tender_uaid}
+    activate stage 2
+    submit form and check result                                ${tender_form_submit_btn_locator}  ${tender_form_submit_success_msg}  ${tender_created_checker_element_locator}
+    sleep  15m
+
+
+Отримати тендер другого етапу та зберегти його
+    [Arguments]                                                 ${username}  ${tender_uaid}
+    [Documentation]                                             Отримати тендер другого етапу по tender id, зберегти його.
+
+    open tender page by uaid                                    ${tender_uaid}
+    Log to Console  ${tender_uaid}
+
+########################################################################################################################
+################################################### END OPEN PROCUREMENT KEYWORDS ###############################
+########################################################################################################################
+
+########################################################################################################################
+################################################### DOCUMENT KEYWORDS ####################################
+########################################################################################################################
+Отримати інформацію із документа
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${doc_id}  ${field}
+    [Documentation]                                             Отримати значення поля field документа doc_id з тендера
+    ...                                                         tender_uaid для перевірки правильності відображення цього поля.
+
+    open tender page by uaid                                    ${tender_uaid}
+    ${return_value} =                                           Run Keyword If  'title' == '${field}'   Отримати інформацію із документа title  ${doc_id}
+    [return]                                                    ${return_value}
+
+Отримати документ
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${doc_id}
+    [Documentation]                                             Завантажити файл з doc_id в заголовку для тендера tender_uaid в
+    ...                                                         директорію OUTPUT_DIR для перевірки вмісту цього файлу.
+
+    open tender page by uaid                                    ${tender_uaid}
+    ${tender_new_doc_locator} =                                 replace string  ${tender_new_doc_locator_tpl}  %doc_id%  ${doc_id}
+    wait until page contains element with reloading             ${tender_new_doc_locator}
+
+    ${file_link} =                                              Execute Javascript  return $('.docs__list .docs__item.js-item:first a.doc__link[href*="https://public-docs-staging.prozorro.gov.ua"]').val('.docs__list .docs__item.js-item:first a.doc__link[href*="https://public-docs-staging.prozorro.gov.ua"]').attr("href")
+    ${file_name} =                                              get text  ${tender_new_doc_locator}
+    download_file  ${file_link}  ${file_name}  ${OUTPUT_DIR}
+    [return]                                                    ${file_name}
+
+
+Отримати документ до лоту
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${lot_id}  ${doc_id}
+    [Documentation]                                             Завантажити файл з doc_id в заголовку для тендера tender_uaid для лоту lot_id
+    ...                                                         в директорію OUTPUT_DIR для перевірки вмісту цього файлу.
+
+    open tender page by uaid                                    ${tender_uaid}
+    ${tender_new_doc_locator} =                                 replace string  ${tender_new_doc_locator_tpl}  %doc_id%  ${doc_id}
+    wait until page contains element with reloading             ${tender_new_doc_locator}
+    ${file_link} =                                              Execute Javascript  return $('.docs__list .docs__item.js-item:last a.doc__link[href*="https://public-docs-staging.prozorro.gov.ua"]').val('.docs__list .docs__item.js-item:first a.doc__link[href*="https://public-docs-staging.prozorro.gov.ua"]').attr("href")
+    ${file_name} =                                              get text  ${tender_new_doc_locator}
+    download_file  ${file_link}  ${file_name}  ${OUTPUT_DIR}
+    [return]                                                    ${file_name}
+
+Отримати посилання на аукціон для глядача
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${lot_id}=Empty
+    [Documentation]                                             Отримати посилання на аукціон для тендера tender_uaid (або для лоту з
+    ...                                                         lot_id в описі для тендера tender_uaid, якщо lot_id != Empty).
+
+    open tender page by uaid                                    ${tender_uaid}
+    log many  ${mode}
+    run keyword if                                              "${mode}" in "open_framework"  submit form and check result     ${bid_form_refresh_btn_locator}  ${bid_form_refresh_success_msg}  ${tender_created_checker_element_locator}  ${true}
+    run keyword if                                              "${mode}" not in "belowThreshold"  wait until page contains element with reloading             ${tender_auction_locator}  10
+    run keyword if                                              "${mode}" in "belowThreshold"  wait until page contains element with reloading             ${tender_auction_belowThreshold_input_locator}
+    ${return_value} =                                           run keyword if  "${mode}" not in "belowThreshold below_funders"  Execute Javascript  return $('#auction-info a[href*="https://auction-staging"]').attr("href")
+#    ${return_value} =                                           run keyword if  "${mode}" in "belowThreshold"  Execute Javascript  return $('#aside-part-pjax a[href*="https://auction-staging"]').attr("href")
+    ...                                                         ELSE IF  '${mode}' in 'belowThreshold below_funders'  Execute Javascript  return $('#aside-part-pjax a[href*="https://auction-staging"]').attr("href")
+    [return]                                                    ${return_value}
+
+Отримати посилання на аукціон для учасника
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${lot_id}=Empty
+    [Documentation]                                             Отримати посилання на участь в аукціоні для користувача username для тендера
+    ...                                                         tender_uaid (або для лоту з lot_id в описі для тендера tender_uaid, якщо lot_id != Empty).
+
+    open tender page by uaid                                    ${tender_uaid}
+    log many  ${mode}
+    run keyword if                                              "${mode}" not in "belowThreshold"  wait until page contains element with reloading             ${tender_auction_locator}  10
+    run keyword if                                              "${mode}" in "belowThreshold"  wait until page contains element with reloading             ${tender_auction_belowThreshold_input_locator}
+    ${return_value} =                                           run keyword if  "${mode}" not in "belowThreshold"  Execute Javascript  return $('#auction-info a[href*="https://auction-staging"]').attr("href")
+#    ${return_value} =                                           run keyword if  "${mode}" in "belowThreshold"  Execute Javascript  return $('#aside-part-pjax a[href*="https://auction-staging"]').attr("href")
+    ...                                                         ELSE IF  '${mode}' in 'belowThreshold'  Execute Javascript  return $('#aside-part-pjax a[href*="https://auction-staging"]').attr("href")
+    [return]                                                    ${return_value}
+########################################################################################################################
+################################################### END DOCUMENT KEYWORDS ###############################
+########################################################################################################################
+
+########################################################################################################################
+################################################### FUNDERS KEYWORDS ###############################
+########################################################################################################################
+
+Видалити донора
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${funders_index}
+    [Documentation]                                             Видалити донора для користувача username для тендера tender_uaid з індексом funders_index
+
+    open tender form by uaid                                    ${tender_uaid}
+    open popup by btn locator                                   ${plan_form_general_panel_edit_btn_locator}
+    click visible element                                       ${tender_form_general_tender_funder_locator}
+    submit current visible popup
+    save tender form and wait synchronization
+
+Додати донора
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${funders_data}
+    [Documentation]                                             Додати донора для користувача username для тендера tender_uaid з даними funders_data
+
+    open tender form by uaid                                    ${tender_uaid}
+    open popup by btn locator                                   ${plan_form_general_panel_edit_btn_locator}
+    click visible element                                       ${tender_form_general_tender_funder_locator}
+    ${funders} =                                                create list  ${funders_data}
+    fill tender form funders                                    ${funders}
+    submit current visible popup
+    save tender form and wait synchronization
+
+########################################################################################################################
+################################################### END FUNDERS KEYWORDS ####################################
+########################################################################################################################
+########################################################################################################################
+################################################### CONTRACTS KEYWORDS ###############################
+########################################################################################################################
+
+Редагувати угоду
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${contract_index}  ${field_name}  ${amount}
+    [Documentation]                                             Редагувати контракт для користувача username для тендера tender_uaid з індексом contract_index
+    ...                                                         для поля field_name та значення amount.
+
+    open tender page by uaid                                    ${tender_uaid}
+    edit contract                                               ${contract_index}  ${field_name}  ${amount}
+    wait until page does not contain element with reloading     ${tender_sync_element_locator}
+
+Встановити дату підписання угоди
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${contract_index}  ${dateSigned}
+    [Documentation]                                             Редагувати контракт для користувача username для тендера tender_uaid з індексом contract_index
+    ...                                                         для поля Дата підписання задати значення dateSigned.
+
+    open tender page by uaid                                    ${tender_uaid}
+#    edit contract                                               ${contract_index}  ${dateSigned}  ${dateSigned}
+    click visible element                                       ${contract_form_0_open_btn_locator}
+    run keyword and ignore error                                wait until element is visible  ${tender_status_active_qualification_value_locator}  5
+    wait until element is visible                               ${contract_contractform_contract_number_input_locator}  60
+    input datetime to exist visible input                       ${contract_contractform_date_signed_input_locator}  ${dateSigned}
+
+    run keyword and ignore error                                submit form and check result  ${contract_contractform_submit_btn_locator}  ${contract_contractform_submit_success_msg}  ${contract_active_form_open_btn_locator}
+    capture page screenshot
+
+    wait until page does not contain element with reloading     ${tender_sync_element_locator}
+
+Вказати період дії угоди
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${contract_index}  ${startDate}  ${endDate}
+    [Documentation]                                             Редагувати контракт для користувача username для тендера tender_uaid з індексом contract_index
+    ...                                                         для поля Дата початку дії контракту задати значення startDate, для дати завершення - endDate.
+
+    open tender page by uaid                                    ${tender_uaid}
+#    edit contract                                               ${contract_index}  ${dateSigned}  ${dateSigned}
+    click visible element                                       ${contract_form_0_open_btn_locator}
+    run keyword and ignore error                                wait until element is visible  ${tender_status_active_qualification_value_locator}  5
+    wait until element is visible                               ${contract_contractform_contract_number_input_locator}  60
+    input datetime to exist visible input                       ${contract_contractform_date_start_input_locator}  ${startDate}
+    input datetime to exist visible input                       ${contract_contractform_date_end_input_locator}  ${endDate}
+
+    run keyword and ignore error                                submit form and check result  ${contract_contractform_submit_btn_locator}  ${contract_contractform_submit_success_msg}  ${contract_active_form_open_btn_locator}
+    capture page screenshot
+
+    wait until page does not contain element with reloading     ${tender_sync_element_locator}
+
+Завантажити документ в угоду
+    [Arguments]                                                 ${username}  ${document}  ${tender_uaid}  ${contract_index}
+    [Documentation]                                             Редагувати контракт для користувача username для тендера tender_uaid з індексом contract_index
+    ...                                                         для додавання документу використовувати значення document.
+
+    open tender page by uaid                                    ${tender_uaid}
+#    edit contract                                               ${contract_index}  ${dateSigned}  ${dateSigned}
+    click visible element                                       ${contract_form_0_open_btn_locator}
+    run keyword and ignore error                                wait until element is visible  ${tender_status_active_qualification_value_locator}  5
+    wait until element is visible                               ${contract_contractform_contract_number_input_locator}  60
+    choose file                                                 ${add_file_to_contract_contractform_locator}  ${document}
+    wait until page does not contain element                    ${popup_dynamic_form_loading_element_locator}  60
+    wait until element is visible                               ${contract_contractform_add_document_type_input_locator}  60
+    capture page screenshot
+    Run Keyword And Ignore Error                                Execute Javascript  $('.fancybox-is-open .fancybox-content select[id*="-document_type"]:last').val('contractSigned').change()
+    capture page screenshot
+    click visible element                                       ${contract_contractform_add_document_description_btn_locator}
+    capture page screenshot
+    wait until element is visible                               ${contract_contractform_add_document_description_input_locator}
+    input text to exist visible input                           ${contract_contractform_add_document_description_input_locator}  test2
+    capture page screenshot
+    click visible element                                       ${contract_contractform_add_document_close_description_btn_locator}
+    capture page screenshot
+
+    run keyword and ignore error                                submit form and check result  ${contract_contractform_submit_btn_locator}  ${contract_contractform_submit_success_msg}  ${contract_active_form_open_btn_locator}
+    capture page screenshot
+
+    wait until page does not contain element with reloading     ${tender_sync_element_locator}
+
+Підтвердити підписання контракту
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${contract_index}
+    [Documentation]                                             Редагувати контракт для користувача username для тендера tender_uaid з індексом contract_index
+    ...                                                         для поля Дата підписання задати значення dateSigned.
+
+    open tender page by uaid                                    ${tender_uaid}
+#    edit contract                                               ${contract_index}  ${dateSigned}  ${dateSigned}
+    click visible element                                       ${contract_active_form_open_btn_locator}
+    run keyword and ignore error                                wait until element is visible  ${tender_status_active_qualification_value_locator}  5
+    wait until element is visible                               ${contract_contractform_submit_btn_locator}  60
+
+    Execute Javascript  $('.fancybox-is-open .fancybox-content button.btn.btn-success').click()
+    Run Keyword And Ignore Error                                wait until element is visible                               ${qualification_ecp_form_open_locator}  60
+    run keyword and ignore error                                wait until element is visible  ${tender_status_active_qualification_value_locator}  10
+    capture page screenshot
+    run keyword and ignore error                                Load Sign
+    capture page screenshot
+
+    run keyword and ignore error                                submit form and check result  ${contract_contractform_submit_btn_locator}  ${contract_contractform_active_submit_success_msg}  ${contract_active_form_open_btn_locator}
+    capture page screenshot
+
+    wait until page does not contain element with reloading     ${tender_sync_element_locator}
+
+Встановити ціну за одиницю для контракту
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${contract_data}
+    [Documentation]                                             Встановити ціну за одиницю для контракту для користувача username для тендера tender_uaid,
+    ...                                                         використовуючи значення з contract_data.
+
+    open tender page by uaid                                    ${tender_uaid}
+    edit unitprices                                             ${tender_uaid}  ${contract_data}
+
+Зареєструвати угоду
+    [Arguments]                                                 ${username}  ${tender_uaid}  ${startDate}  ${endDate}
+    [Documentation]                                             Зареєструвати угоду для користувача username для тендера tender_uaid,
+    ...                                                         для поля Дата початку дії угоди задати значення startDate, для дати завершення - endDate.
+
+    open tender page by uaid                                    ${tender_uaid}
+    active agreement contract                                   ${startDate}  ${endDate}
+
+########################################################################################################################
+################################################### END CONTRACTS KEYWORDS ####################################
+########################################################################################################################
+
+########################################################################################################################
+################################################### AGREEMENT KEYWORDS #################################################
+########################################################################################################################
+
+Пошук угоди по ідентифікатору
+    [Arguments]                                                 ${username}  ${agreement_uaid}  ${save_key}=${Empty}
+    [Documentation]                                             Знайти угоду з uaid рівним tender_uaid.
+
+    open agreement search form
+    input to search form and wait results                       ${agreement_search_form_query_input_locator}  ${agreement_uaid}  ${agreement_search_form_result_locator_tpl}
+
+Отримати доступ до угоди
+    [Arguments]                                                 ${username}  ${agreement_uaid}
+    [Documentation]                                             Отримати доступ до угоди по agreement id.
+
+    open agreement page by uaid                                    ${agreement_uaid}
+    Log to Console  ${agreement_uaid}
+
+Завантажити документ в рамкову угоду
+    [Arguments]                                                 ${username}  ${filepath}  ${tender_uaid}
+    [Documentation]                                             Завантажити документ, який знаходиться по шляху filepath,
+    ...                                                         до тендера tender_uaid.
+
+    open agreement form by uaid                                 ${tender_uaid}
+    add document in agreement                                   ${filepath}
+    save agreement form and wait synchronization
+
+Отримати інформацію із угоди
+    [Arguments]                                                 ${username}  ${agreement_uaid}  ${field_name}
+    [Documentation]                                             Отримати значення поля field_name для тендера tender_uaid.
+
+    # fix for preventing error "Resolving variable '${award.value.amount}' failed: AttributeError: value" in next keywords for owner role
+##    run keyword if                                              ${is_test_role_owner} and '${field_name}' in 'awards[0].complaintPeriod.endDate awards[1].complaintPeriod.endDate awards[2].complaintPeriod.endDate awards[3].complaintPeriod.endDate'  fix awards data in global Users variable  ${username}
+
+    open agreement page by uaid                                 ${agreement_uaid}
+    update agreement queue
+    submit form and check result                                ${agreement_form_refresh_btn_locator}  ${agreement_form_refresh_success_msg}  ${tender_created_checker_element_locator}  ${true}
+    Execute JavaScript    window.scrollTo(0, document.body.scrollHeight);
+    sleep  10
+    ${return_value} =                                           Run Keyword If  '${field_name}' == 'changes[0].status'      get value by locator on opened page  ${agreement_changes_0_status_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[0].rationaleType'   get value by locator on opened page  ${agreement_changes_0_rationaleType_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[0].rationale'  get value by locator on opened page  ${agreement_changes_0_rationale_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[0].modifications[0].itemId'  get value by locator on opened page  ${agreement_changes_0_modifications_0_itemId_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[0].modifications[0].factor'  get value by locator on opened page  ${agreement_changes_0_modifications_0_factor_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[1].rationaleType'   get value by locator on opened page  ${agreement_changes_1_rationaleType_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[1].rationale'  get value by locator on opened page  ${agreement_changes_1_rationale_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[1].modifications[0].itemId'  get value by locator on opened page  ${agreement_changes_1_modifications_0_itemId_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[1].modifications[0].factor'  get value by locator on opened page  ${agreement_changes_1_modifications_0_factor_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[1].status'   get value by locator on opened page  ${agreement_changes_1_status_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[2].rationaleType'   get value by locator on opened page  ${agreement_changes_2_rationaleType_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[2].rationale'   get value by locator on opened page  ${agreement_changes_2_rationale_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[2].modifications[0].itemId'   get value by locator on opened page  ${agreement_changes_2_modifications_0_itemId_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[2].modifications[0].factor'   get value by locator on opened page  ${agreement_changes_2_modifications_0_factor_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[2].status'   get value by locator on opened page  ${agreement_changes_2_status_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[3].rationaleType'   get value by locator on opened page  ${agreement_changes_3_rationaleType_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[3].rationale'   get value by locator on opened page  ${agreement_changes_3_rationale_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[3].modifications[0].itemId'   get value by locator on opened page  ${agreement_changes_3_modifications_0_itemId_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[3].modifications[0].factor'   get value by locator on opened page  ${agreement_changes_2_modifications_0_factor_value_locator}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[3].modifications[0].contractId'   get value by locator on opened page  ${}
+    ...  ELSE                                                   Run Keyword If  '${field_name}' == 'changes[3].status'   get value by locator on opened page  ${agreement_changes_3_status_value_locator}
+    [Return]                                                    ${return_value}
+
+########################################################################################################################
+################################################### AGREEMENT KEYWORDS #################################################
+########################################################################################################################
